@@ -1,0 +1,240 @@
+// Prisma Schema for Platium.vip Game Streaming
+// PostgreSQL Database
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// USER PROFILES
+// ============================================================================
+
+model UserProfile {
+  id                String   @id @default(uuid()) @map("id")
+  platiumUserId     String   @unique @map("platium_user_id")
+  username          String   @unique
+  displayName       String?  @map("display_name")
+  avatarUrl         String?  @map("avatar_url")
+  preferredEmulator String?  @map("preferred_emulator") @default("retroarch")
+  isOnline          Boolean  @map("is_online") @default(false)
+  lastSeenAt        DateTime @map("last_seen_at") @default(now())
+  createdAt         DateTime @map("created_at") @default(now())
+  updatedAt         DateTime @map("updated_at") @default(now())
+
+  // Relations
+  createdSessions   GameSession[]           @relation("SessionCreator")
+  library           UserGameLibrary[]
+  participations    SessionParticipant[]
+  chatMessages      SessionChat[]
+  sessionHistory    SessionHistory[]
+
+  @@map("user_profiles")
+  @@index([username])
+  @@index([isOnline])
+}
+
+// ============================================================================
+// GAMES
+// ============================================================================
+
+model Game {
+  id               String   @id @default(uuid()) @map("id")
+  title            String   @map("title")
+  slug             String   @unique @map("slug")
+  system           String   @map("system")
+  year             Int?     @map("year")
+  genre            String?  @map("genre")
+  playerCount      Int      @map("player_count") @default(1)
+  romPath          String?  @map("rom_path")
+  emulator         String   @map("emulator") @default("retroarch")
+  emulatorCore     String?  @map("emulator_core")
+  coverArtUrl      String?  @map("cover_art_url")
+  screenshotUrls   String[] @map("screenshot_urls") @default([])
+  description      String?  @db.Text
+  rating           Decimal? @db.Decimal(3, 2)
+  playCount        Int      @map("play_count") @default(0)
+  isActive         Boolean  @map("is_active") @default(true)
+  createdAt        DateTime @map("created_at") @default(now())
+  updatedAt        DateTime @map("updated_at") @default(now())
+
+  // Relations
+  sessions         GameSession[]
+  libraryEntries   UserGameLibrary[]
+  sessionHistory   SessionHistory[]
+
+  @@map("games")
+  @@index([title])
+  @@index([system])
+  @@index([isActive])
+}
+
+// ============================================================================
+// GAME SESSIONS
+// ============================================================================
+
+model GameSession {
+  id               String         @id @default(uuid()) @map("id")
+  gameId           String         @map("game_id")
+  createdBy        String         @map("created_by")
+  sessionCode      String?        @map("session_code") @unique
+  status           SessionStatus  @default(STARTING)
+  sessionType      SessionType    @default(SINGLE)
+  isPrivate        Boolean        @map("is_private") @default(false)
+  maxPlayers       Int            @map("max_players") @default(1)
+  currentPlayers   Int            @map("current_players") @default(0)
+  spectatorCount   Int            @map("spectator_count") @default(0)
+  containerId      String?        @map("container_id")
+  containerIp      String?        @map("container_ip")
+  containerPort    Int?           @map("container_port")
+  videoQuality     VideoQuality   @default(Q1080P)
+  fps              Int            @default(60)
+  startedAt        DateTime       @map("started_at") @default(now())
+  endedAt          DateTime?      @map("ended_at")
+  lastActivityAt   DateTime       @map("last_activity_at") @default(now())
+  durationMinutes  Int?           @map("duration_minutes")
+
+  // Relations
+  game             Game           @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  creator          UserProfile    @relation("SessionCreator", fields: [createdBy], references: [id], onDelete: Cascade)
+  participants     SessionParticipant[]
+  chatMessages     SessionChat[]
+  history          SessionHistory[]
+
+  @@map("game_sessions")
+  @@index([status])
+  @@index([startedAt])
+}
+
+enum SessionStatus {
+  STARTING @map("starting")
+  ACTIVE   @map("active")
+  ENDING   @map("ending")
+  ENDED    @map("ended")
+  ERROR    @map("error")
+}
+
+enum SessionType {
+  SINGLE     @map("single")
+  MULTIPLAYER @map("multiplayer")
+  SPECTATE   @map("spectate")
+}
+
+enum VideoQuality {
+  Q720P  @map("720p")
+  Q1080P @map("1080p")
+  Q1440P @map("1440p")
+}
+
+// ============================================================================
+// SESSION PARTICIPANTS
+// ============================================================================
+
+model SessionParticipant {
+  sessionId              String              @map("session_id")
+  userId                 String              @map("user_id")
+  role                   ParticipantRole     @default(PLAYER)
+  isHost                 Boolean             @map("is_host") @default(false)
+  joinedAt               DateTime            @map("joined_at") @default(now())
+  leftAt                 DateTime?           @map("left_at")
+  totalDurationMinutes   Int                 @map("total_duration_minutes") @default(0)
+
+  // Relations
+  session                GameSession         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user                   UserProfile         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([sessionId, userId])
+  @@map("session_participants")
+  @@index([userId])
+}
+
+enum ParticipantRole {
+  PLAYER     @map("player")
+  SPECTATOR  @map("spectator")
+  MODERATOR  @map("moderator")
+}
+
+// ============================================================================
+// SESSION CHAT
+// ============================================================================
+
+model SessionChat {
+  id         String        @id @default(uuid()) @map("id")
+  sessionId  String        @map("session_id")
+  userId     String        @map("user_id")
+  message    String        @db.Text
+  type       MessageType   @default(CHAT)
+  createdAt  DateTime      @map("created_at") @default(now())
+
+  // Relations
+  session    GameSession   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user       UserProfile   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("session_chat")
+  @@index([sessionId, createdAt])
+  @@index([userId])
+}
+
+enum MessageType {
+  CHAT       @map("chat")
+  SYSTEM     @map("system")
+  GAME_EVENT @map("game_event")
+}
+
+// ============================================================================
+// USER GAME LIBRARY
+// ============================================================================
+
+model UserGameLibrary {
+  userId          String      @map("user_id")
+  gameId          String      @map("game_id")
+  status          GameStatus  @default(NOT_PLAYED)
+  playTimeMinutes Int         @map("play_time_minutes") @default(0)
+  lastPlayedAt    DateTime?   @map("last_played_at")
+  rating          Int?
+  addedAt         DateTime    @map("added_at") @default(now())
+
+  // Relations
+  user            UserProfile @relation(fields: [userId], references: [id], onDelete: Cascade)
+  game            Game        @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@id([userId, gameId])
+  @@map("user_game_library")
+  @@index([userId])
+}
+
+enum GameStatus {
+  NOT_PLAYED  @map("not_played")
+  PLAYING     @map("playing")
+  COMPLETED   @map("completed")
+  FAVORITE    @map("favorite")
+}
+
+// ============================================================================
+// SESSION HISTORY
+// ============================================================================
+
+model SessionHistory {
+  id              String        @id @default(uuid()) @map("id")
+  sessionId       String        @map("session_id")
+  userId          String        @map("user_id")
+  gameId          String        @map("game_id")
+  role            ParticipantRole
+  startedAt       DateTime      @map("started_at")
+  endedAt         DateTime      @map("ended_at")
+  durationMinutes Int           @map("duration_minutes")
+  totalPlayers    Int           @map("total_players") @default(1)
+
+  // Relations
+  session         GameSession   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user            UserProfile   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  game            Game          @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@map("session_history")
+  @@index([userId, endedAt])
+  @@index([gameId, endedAt])
+}

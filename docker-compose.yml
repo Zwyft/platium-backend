@@ -1,0 +1,233 @@
+# Platium.vip Game Streaming - Backend Infrastructure
+# Docker Compose for backend services
+
+version: '3.8'
+
+services:
+  # ========================================================================
+  # PostgreSQL Database
+  # ========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: platium_postgres
+    environment:
+      POSTGRES_DB: platium_gaming
+      POSTGRES_USER: platium_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secure_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./prisma/schema.prisma:/docker-entrypoint-initdb.d/00-schema.sql:ro
+      - ./scripts/init-db.sh:/docker-entrypoint-initdb.d/01-init.sh:ro
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    networks:
+      - platium_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U platium_user -d platium_gaming"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ========================================================================
+  # Redis Cache
+  # ========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: platium_redis
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis_password}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    networks:
+      - platium_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ========================================================================
+  # Game Streaming API Server
+  # ========================================================================
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: platium_api
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - DATABASE_URL=postgresql://platium_user:${POSTGRES_PASSWORD:-secure_password}@postgres:5432/platium_gaming
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_password}@redis:6379
+      - CLIENT_URL=https://platium.vip
+      - PLATIUM_API_URL=https://platium.vip
+      - PUBLIC_IP=${PUBLIC_IP}
+      - MEDIASOUP_LISTEN_IP=0.0.0.0
+      - MEDIASOUP_ANNOUNCED_IP=${PUBLIC_IP}
+      - MAX_CONCURRENT_SESSIONS=10
+    volumes:
+      - /home/jak/projects/games:/games:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "3001:3001"
+      - "3002:3002" # Socket.io
+      - "40000-49999:40000-49999/udp" # WebRTC ports
+      - "40000-49999:40000-49999/tcp"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - platium_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ========================================================================
+  # Nginx Reverse Proxy
+  # ========================================================================
+  nginx:
+    image: nginx:alpine
+    container_name: platium_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+    networks:
+      - platium_network
+
+  # ========================================================================
+  # Game Session Manager
+  # ========================================================================
+  session-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile.session-manager
+    container_name: platium_session_manager
+    environment:
+      - DOCKER_NETWORK=platium_network
+      - POSTGRES_URL=postgresql://platium_user:${POSTGRES_PASSWORD:-secure_password}@postgres:5432/platium_gaming
+      - MAX_SESSIONS=10
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /home/jak/projects/games:/games:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+    networks:
+      - platium_network
+
+  # ========================================================================
+  # Prometheus Monitoring (Optional)
+  # ========================================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: platium_prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    networks:
+      - platium_network
+    profiles:
+      - monitoring
+
+  # ========================================================================
+  # Grafana Monitoring (Optional)
+  # ========================================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: platium_grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3030:3000"
+    restart: unless-stopped
+    networks:
+      - platium_network
+    profiles:
+      - monitoring
+
+# ========================================================================
+# Networks
+# ========================================================================
+networks:
+  platium_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16
+
+# ========================================================================
+# Volumes
+# ========================================================================
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+# ========================================================================
+# Usage Instructions
+# ========================================================================
+# Quick Start:
+#
+# 1. Copy environment file
+#    cp .env.example .env
+#    # Edit .env with your configuration
+#
+# 2. Start services
+#    docker-compose up -d
+#
+# 3. Initialize database
+#    docker-compose exec api npm run prisma:generate
+#    docker-compose exec api npm run migrate:dev
+#    docker-compose exec api npm run seed
+#
+# 4. Add games
+#    # Copy ROMs to /home/jak/projects/games/
+#    docker-compose exec api npm run scan:roms
+#
+# 5. Check status
+#    docker-compose ps
+#    curl http://localhost:3001/health
+#
+# Access Points:
+# - API: http://localhost:3001
+# - WebSocket: ws://localhost:3002
+# - Grafana: http://localhost:3030 (admin/admin)
+# - Prometheus: http://localhost:9090
+#
+# Development:
+# - Watch mode: docker-compose up -d --build api
+# - View logs: docker-compose logs -f api
+# - Execute commands: docker-compose exec api sh
+#
+# Production:
+# - Use external PostgreSQL and Redis services
+# - Enable SSL in nginx
+# - Set up reverse proxy to platium.vip
+# - Configure domain for API (api.platium.vip)
